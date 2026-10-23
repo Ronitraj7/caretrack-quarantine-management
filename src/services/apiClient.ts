@@ -14,7 +14,7 @@ import {
 } from '../types';
 
 // Read API base URL from Vite environment variable with fallback to local development port 3001
-const RAW_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const RAW_API_URL = import.meta.env.VITE_API_URL || '/api';
 export const API_BASE_URL = RAW_API_URL.replace(/\/+$/, '');
 
 export interface ApiResponse<T> {
