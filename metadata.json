@@ -1,0 +1,6 @@
+{
+  "name": "CareTrack",
+  "description": "Patient management and workflow system for virus quarantine and treatment facilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
