@@ -46,6 +46,23 @@ export interface DoctorVisit {
   recommendDischargeReview: boolean;
 }
 
+export interface DoctorClearance {
+  isCleared: boolean;
+  clearedDate?: string;
+  clearedTime?: string;
+  doctorName?: string;
+  doctorId?: string;
+  clinicalJustification?: string;
+}
+
+export interface OutcomeRecord {
+  outcome: FinalOutcome;
+  date: string;
+  recordedBy: string;
+  notes?: string;
+  timestamp: number;
+}
+
 export interface Patient {
   id: string; // e.g. "PT-1001"
   name: string;
@@ -60,6 +77,8 @@ export interface Patient {
   outcomeDate?: string;
   outcomeRecordedBy?: string;
   outcomeNotes?: string;
+  outcomeHistory?: OutcomeRecord[];
+  doctorClearance?: DoctorClearance;
   dischargeDate?: string;
   dischargeAuthorizedBy?: string;
   temperatureHistory: TemperatureReading[];
@@ -81,12 +100,62 @@ export interface FacilityMetrics {
   pendingTempChecksToday: number;
   pendingDoctorVisitsToday: number;
   eligibleForDischargeCount: number;
+  awaitingDoctorClearanceCount: number;
+  awaitingAdminDischargeCount: number;
   totalResolvedPatients: number;
   recoveredCount: number;
   deceasedCount: number;
   mortalityRate: number; // percentage 0 - 100
   recoveryRate: number; // percentage 0 - 100
   isHighMortalityAlert: boolean; // > 15%
+  nearCapacityAlert: boolean; // >= 90% (67+ beds)
+}
+
+export interface DischargeEvent {
+  id: string;
+  patientId: string;
+  patientName: string;
+  date: string;
+  time: string;
+  authorizedBy: string;
+  authorizedRole: UserRole;
+  bedFreed: number;
+  notes?: string;
+}
+
+export interface OutcomeEvent {
+  id: string;
+  patientId: string;
+  patientName: string;
+  outcome: FinalOutcome;
+  date: string;
+  time: string;
+  recordedBy: string;
+  recordedByRole: UserRole;
+  notes?: string;
+}
+
+export interface ActivityLog {
+  id: string;
+  type: 'admission' | 'temperature' | 'consultation' | 'clearance' | 'discharge' | 'outcome';
+  patientId: string;
+  patientName: string;
+  summary: string;
+  details?: string;
+  timestamp: number;
+  date: string;
+  time: string;
+  actorName: string;
+  actorRole: UserRole;
+}
+
+export interface FacilityConfig {
+  id: string;
+  name: string;
+  maxCapacity: number;
+  feverThreshold: number;
+  mortalityAlertThreshold: number;
+  currentFacilityDate: string;
 }
 
 export type ActiveTab = 
@@ -97,3 +166,4 @@ export type ActiveTab =
   | 'discharge'
   | 'analytics'
   | 'about';
+

@@ -30,6 +30,7 @@ export const DoctorVisitsView: React.FC = () => {
     facilityDate,
     feverThreshold,
     recordDoctorVisit,
+    grantDoctorClearance,
     setSelectedPatientId,
     checkPermission,
   } = useFacility();
@@ -45,7 +46,9 @@ export const DoctorVisitsView: React.FC = () => {
     'normal' | 'mild_distress' | 'moderate_distress' | 'severe'
   >('normal');
   const [recommendDischargeReview, setRecommendDischargeReview] = useState(false);
+  const [grantClearanceInVisit, setGrantClearanceInVisit] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const activePatients = useMemo(
     () => patients.filter((p) => p.status === 'active'),
@@ -107,30 +110,43 @@ export const DoctorVisitsView: React.FC = () => {
     setTreatmentUpdates('Continue isolation protocol, monitor oxygen saturation Q4H.');
     setRespiratoryStatus('normal');
     setRecommendDischargeReview(elig.isEligible);
+    setGrantClearanceInVisit(elig.isEligible && !patient.doctorClearance?.isCleared);
     setFormError(null);
     setActiveConsultationPatientId(patientId);
   };
 
-  const handleSaveConsultation = (e: React.FormEvent) => {
+  const handleSaveConsultation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeConsultationPatientId) return;
+    if (!activeConsultationPatientId || isSubmitting) return;
 
     if (!clinicalNotes.trim()) {
       setFormError('Clinical notes are required to complete the medical consultation.');
       return;
     }
 
-    const res = recordDoctorVisit(activeConsultationPatientId, {
-      clinicalNotes,
-      treatmentUpdates,
-      respiratoryStatus,
-      recommendDischargeReview,
-    });
+    setIsSubmitting(true);
+    setFormError(null);
 
-    if (res.success) {
-      setActiveConsultationPatientId(null);
-    } else {
-      setFormError(res.message);
+    try {
+      const res = await recordDoctorVisit(activeConsultationPatientId, {
+        clinicalNotes,
+        treatmentUpdates,
+        respiratoryStatus,
+        recommendDischargeReview,
+      });
+
+      if (res.success) {
+        if (grantClearanceInVisit) {
+          await grantDoctorClearance(activeConsultationPatientId, clinicalNotes);
+        }
+        setActiveConsultationPatientId(null);
+      } else {
+        setFormError(res.message);
+      }
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'An error occurred completing consultation.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -260,11 +276,15 @@ export const DoctorVisitsView: React.FC = () => {
                       Bed #{patient.bedNumber} · {patient.ward}
                     </span>
 
-                    {eligibility.isEligible && (
-                      <span className="text-[10px] font-semibold font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                        Discharge Ready (3 Afebrile Days)
+                    {patient.doctorClearance?.isCleared ? (
+                      <span className="text-[10px] font-semibold font-mono px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200">
+                        Doctor Clearance Granted (Stage 2 Complete)
                       </span>
-                    )}
+                    ) : eligibility.isEligible ? (
+                      <span className="text-[10px] font-semibold font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                        Stage 1 Met (3 Afebrile Days) · Awaiting Doctor Clearance
+                      </span>
+                    ) : null}
                   </div>
 
                   {/* Temperature Status Indicator & Warning */}
@@ -458,17 +478,74 @@ export const DoctorVisitsView: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center gap-2.5">
-                <input
-                  type="checkbox"
-                  id="recDischarge"
-                  checked={recommendDischargeReview}
-                  onChange={(e) => setRecommendDischargeReview(e.target.checked)}
-                  className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
-                />
-                <label htmlFor="recDischarge" className="text-slate-800 font-medium cursor-pointer">
-                  Recommend for Administrative Discharge Review
-                </label>
+              {/* Discharge Governance & Medical Clearance Section */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Discharge Governance
+                  </span>
+                  {activePatient && (
+                    <span className="text-xs font-mono font-medium text-slate-500">
+                      Afebrile Streak: {evaluateDischargeEligibility(activePatient, facilityDate, feverThreshold).consecutiveDays} / 3 days
+                    </span>
+                  )}
+                </div>
+
+                {activePatient && evaluateDischargeEligibility(activePatient, facilityDate, feverThreshold).isEligible ? (
+                  <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg space-y-2">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <div className="text-xs">
+                        <p className="font-semibold text-emerald-900">
+                          Clinical Criteria Met (Stage 1 Complete)
+                        </p>
+                        <p className="text-emerald-700 text-[11px] font-mono mt-0.5">
+                          Verified fever-free dates: {evaluateDischargeEligibility(activePatient, facilityDate, feverThreshold).qualifyingDays.map((d) => d.date).join(', ')}
+                        </p>
+                      </div>
+                    </div>
+
+                    {activePatient.doctorClearance?.isCleared ? (
+                      <div className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded p-2">
+                        Doctor Medical Clearance was previously granted on{' '}
+                        <strong>{activePatient.doctorClearance.clearedDate}</strong> by{' '}
+                        <strong>{activePatient.doctorClearance.doctorName}</strong>. Patient is waiting in Stage 3 for Administrator discharge execution.
+                      </div>
+                    ) : (
+                      <label className="flex items-start gap-2.5 pt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={grantClearanceInVisit}
+                          onChange={(e) => setGrantClearanceInVisit(e.target.checked)}
+                          className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
+                        />
+                        <span className="text-xs font-medium text-slate-800">
+                          <strong className="text-blue-900 font-semibold">Grant Attending Doctor Medical Clearance (Stage 2)</strong>
+                          <span className="block text-[11px] text-slate-600 mt-0.5">
+                            Authorizes patient for Stage 3 Administrative Discharge and bed release.
+                          </span>
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-slate-500 bg-white p-2 rounded border border-slate-200">
+                    Patient has not yet met the 3-day consecutive afebrile requirement (requires 3 full calendar days with valid readings &lt; {feverThreshold.toFixed(1)}°C). Doctor clearance cannot be issued until Stage 1 criteria are satisfied.
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1 border-t border-slate-200">
+                  <input
+                    type="checkbox"
+                    id="recDischarge"
+                    checked={recommendDischargeReview}
+                    onChange={(e) => setRecommendDischargeReview(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
+                  />
+                  <label htmlFor="recDischarge" className="text-xs text-slate-700 font-medium cursor-pointer">
+                    Flag for routine discharge review in shift handover notes
+                  </label>
+                </div>
               </div>
 
               <div className="pt-2 text-[11px] text-slate-500 font-mono">
@@ -485,9 +562,10 @@ export const DoctorVisitsView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold rounded-lg shadow-xs flex items-center gap-2"
                 >
-                  Complete Consultation
+                  {isSubmitting ? 'Saving to API...' : 'Complete Consultation'}
                 </button>
               </div>
             </form>

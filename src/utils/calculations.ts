@@ -67,25 +67,49 @@ export function validateTemperatureInput(value: string | number): {
 }
 
 /**
- * Given two dates 'YYYY-MM-DD', returns array of date strings between them inclusive
+ * Given two dates 'YYYY-MM-DD', returns array of date strings between them inclusive.
+ * Uses UTC date calculations to guarantee correct behavior across month and year boundaries,
+ * leap years, and daylight saving transitions.
  */
 export function getDateRangeInclusive(startDateStr: string, endDateStr: string): string[] {
   const dates: string[] = [];
-  const curr = new Date(startDateStr + 'T00:00:00');
-  const end = new Date(endDateStr + 'T00:00:00');
+  const [sy, sm, sd] = startDateStr.split('-').map(Number);
+  const [ey, em, ed] = endDateStr.split('-').map(Number);
+  if (!sy || !sm || !sd || !ey || !em || !ed) return [startDateStr];
 
-  if (curr > end) {
+  const curr = new Date(Date.UTC(sy, sm - 1, sd));
+  const end = new Date(Date.UTC(ey, em - 1, ed));
+
+  if (curr.getTime() > end.getTime()) {
     return [startDateStr];
   }
 
-  while (curr <= end) {
-    const year = curr.getFullYear();
-    const month = String(curr.getMonth() + 1).padStart(2, '0');
-    const day = String(curr.getDate()).padStart(2, '0');
+  while (curr.getTime() <= end.getTime()) {
+    const year = curr.getUTCFullYear();
+    const month = String(curr.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(curr.getUTCDate()).padStart(2, '0');
     dates.push(`${year}-${month}-${day}`);
-    curr.setDate(curr.getDate() + 1);
+    curr.setUTCDate(curr.getUTCDate() + 1);
   }
   return dates;
+}
+
+export type DischargeStage =
+  | 'in_quarantine'
+  | 'awaiting_doctor_clearance'
+  | 'awaiting_admin_discharge'
+  | 'discharged';
+
+export interface DischargeStageInfo {
+  stage: DischargeStage;
+  label: string;
+  isClinicallyEligible: boolean;
+  isDoctorCleared: boolean;
+  isAdminDischarged: boolean;
+  qualifyingDays: Array<{ date: string; readings: TemperatureReading[]; maxTemp: number }>;
+  consecutiveDays: number;
+  streakBreakReason?: string;
+  summary: string;
 }
 
 /**
@@ -120,8 +144,6 @@ export function evaluateDischargeEligibility(
   }
 
   // Check the sequence of days up to facilityDate
-  // A patient may have completed 3 days either ending today (if today's readings are complete & fever-free)
-  // or ending yesterday.
   const admissionDate = patient.admissionDate;
   const evaluationDate = facilityDate;
 
@@ -143,8 +165,6 @@ export function evaluateDischargeEligibility(
     if (!dayReadings || dayReadings.length === 0) {
       // Missing measurement: breaks streak, CANNOT count as fever-free
       if (day !== evaluationDate) {
-        // Only breaks streak if it's a past calendar day. If it's today and today has no reading yet,
-        // it doesn't add to streak, but past unbroken days may already have satisfied the 3 days!
         currentStreak = 0;
         currentStreakDays = [];
         lastBreakReason = `Missing temperature reading on ${day}`;
@@ -173,12 +193,12 @@ export function evaluateDischargeEligibility(
   }
 
   const isEligible = currentStreak >= 3;
-  // If eligible or has streak, get the qualifying days (last 3 if >= 3)
+  // If eligible, get the last 3 qualifying days
   const qualifyingDays = isEligible ? currentStreakDays.slice(-3) : currentStreakDays;
 
   let summary = '';
   if (isEligible) {
-    summary = `Eligible for discharge: Completed ${currentStreak} consecutive fever-free days (${qualifyingDays.map(q => q.date).join(', ')}).`;
+    summary = `Eligible for discharge review: Completed ${currentStreak} consecutive fever-free days (${qualifyingDays.map(q => q.date).join(', ')}).`;
   } else if (currentStreak > 0) {
     summary = `${currentStreak} of 3 consecutive fever-free days recorded. Needs ${3 - currentStreak} more consecutive fever-free day(s).`;
   } else if (lastBreakReason) {
@@ -193,6 +213,72 @@ export function evaluateDischargeEligibility(
     qualifyingDays,
     streakBreakReason: lastBreakReason || undefined,
     summary,
+  };
+}
+
+/**
+ * Evaluates the three distinct discharge stages:
+ * 1. Clinical Eligibility (3 afebrile days)
+ * 2. Doctor Medical Clearance
+ * 3. Administrator Authorized Discharge
+ */
+export function getDischargeStage(
+  patient: Patient,
+  facilityDate: string,
+  feverThreshold: number = DEFAULT_FEVER_THRESHOLD
+): DischargeStageInfo {
+  if (patient.status === 'discharged') {
+    return {
+      stage: 'discharged',
+      label: 'Discharged & Bed Released',
+      isClinicallyEligible: true,
+      isDoctorCleared: true,
+      isAdminDischarged: true,
+      qualifyingDays: [],
+      consecutiveDays: 3,
+      summary: `Discharge completed on ${patient.dischargeDate || 'record'} authorized by ${patient.dischargeAuthorizedBy || 'Administrator'}.`,
+    };
+  }
+
+  const eligibility = evaluateDischargeEligibility(patient, facilityDate, feverThreshold);
+  const isDoctorCleared = patient.doctorClearance?.isCleared === true;
+
+  if (eligibility.isEligible && isDoctorCleared) {
+    return {
+      stage: 'awaiting_admin_discharge',
+      label: 'Awaiting Admin Discharge',
+      isClinicallyEligible: true,
+      isDoctorCleared: true,
+      isAdminDischarged: false,
+      qualifyingDays: eligibility.qualifyingDays,
+      consecutiveDays: eligibility.consecutiveDays,
+      summary: `Cleared by ${patient.doctorClearance?.doctorName || 'Doctor'} on ${patient.doctorClearance?.clearedDate || facilityDate}. Awaiting Administrator sign-off to release bed.`,
+    };
+  }
+
+  if (eligibility.isEligible && !isDoctorCleared) {
+    return {
+      stage: 'awaiting_doctor_clearance',
+      label: 'Awaiting Doctor Clearance',
+      isClinicallyEligible: true,
+      isDoctorCleared: false,
+      isAdminDischarged: false,
+      qualifyingDays: eligibility.qualifyingDays,
+      consecutiveDays: eligibility.consecutiveDays,
+      summary: `Completed 3 consecutive fever-free days (${eligibility.qualifyingDays.map(q => q.date).join(', ')}). Awaiting Doctor medical clearance.`,
+    };
+  }
+
+  return {
+    stage: 'in_quarantine',
+    label: `In Quarantine (${eligibility.consecutiveDays}/3 Days)`,
+    isClinicallyEligible: false,
+    isDoctorCleared: false,
+    isAdminDischarged: false,
+    qualifyingDays: eligibility.qualifyingDays,
+    consecutiveDays: eligibility.consecutiveDays,
+    streakBreakReason: eligibility.streakBreakReason,
+    summary: eligibility.summary,
   };
 }
 
@@ -245,6 +331,16 @@ export function calculateFacilityMetrics(
     (p) => evaluateDischargeEligibility(p, facilityDate, feverThreshold).isEligible
   ).length;
 
+  const awaitingDoctorClearanceCount = activePatients.filter((p) => {
+    const stage = getDischargeStage(p, facilityDate, feverThreshold);
+    return stage.stage === 'awaiting_doctor_clearance';
+  }).length;
+
+  const awaitingAdminDischargeCount = activePatients.filter((p) => {
+    const stage = getDischargeStage(p, facilityDate, feverThreshold);
+    return stage.stage === 'awaiting_admin_discharge';
+  }).length;
+
   // Final outcomes calculation:
   // Must use patients with recorded final outcomes.
   // Do NOT treat active patients or unknown outcomes as recovered!
@@ -261,6 +357,8 @@ export function calculateFacilityMetrics(
 
   // Prominent warning when observed mortality rate exceeds 15%
   const isHighMortalityAlert = mortalityRate > 15 && totalResolved > 0;
+  // Capacity warning when occupied beds >= 67 (90%)
+  const nearCapacityAlert = occupiedBeds >= 67;
 
   return {
     totalAdmittedActive: activePatients.length,
@@ -269,12 +367,15 @@ export function calculateFacilityMetrics(
     pendingTempChecksToday,
     pendingDoctorVisitsToday,
     eligibleForDischargeCount,
+    awaitingDoctorClearanceCount,
+    awaitingAdminDischargeCount,
     totalResolvedPatients: totalResolved,
     recoveredCount,
     deceasedCount,
     mortalityRate: Math.round(mortalityRate * 10) / 10,
     recoveryRate: Math.round(recoveryRate * 10) / 10,
     isHighMortalityAlert,
+    nearCapacityAlert,
   };
 }
 

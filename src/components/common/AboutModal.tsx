@@ -39,31 +39,31 @@ export const AboutModal: React.FC = () => {
           <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 flex items-start gap-2.5">
             <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
-              <strong className="font-semibold block mb-0.5">Prototype & Data Privacy Disclaimer</strong>
-              This software is a functional prototype built for product evaluation. All patient names, IDs, and records are fictional sample data. Prototype data is stored locally in the browser and is NOT secure or suitable for real Protected Health Information (PHI) or production clinical care.
+              <strong className="font-semibold block mb-0.5">Prototype &amp; Data Privacy Disclaimer</strong>
+              This software is a functional prototype built for product evaluation. All patient names, IDs, and records are fictional sample data stored locally in browser storage. It does not provide real enterprise authentication or encryption and is NOT secure or suitable for real Protected Health Information (PHI) or production clinical care.
             </div>
           </div>
 
           <div>
             <h4 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
               <Layers className="w-4 h-4 text-blue-600" />
-              1. Discharge Criteria & Clinical Assumptions
+              1. 3-Stage Discharge Safety Governance &amp; Clinical Rules
             </h4>
             <ul className="space-y-1.5 pl-4 list-disc text-slate-600">
               <li>
-                <strong>Configurable Fever Threshold ({feverThreshold.toFixed(1)}°C):</strong> 38.0°C is adopted as a demonstration prototype assumption, NOT an established clinical rule. The threshold can be adjusted in the header toolbar to test varying outbreak protocols.
+                <strong>Stage 1 (Clinical Eligibility):</strong> Requires three full consecutive calendar days with documented temperature readings below the configurable threshold ({feverThreshold.toFixed(1)}°C). Missing calendar days never count as afebrile; a fever spike resets the counter to zero. Exact qualifying dates are displayed for clinical transparency.
               </li>
               <li>
-                <strong>3 Consecutive Fever-Free Days Rule:</strong> To qualify for discharge review, a patient must complete three full consecutive calendar days where at least one valid temperature check was recorded and all readings on that day were &lt; {feverThreshold.toFixed(1)}°C.
+                <strong>Stage 2 (Doctor Medical Clearance):</strong> Attending Physicians review patient history, vitals, and respiratory status to sign off medical clearance. If an afebrile patient subsequently records a fever, any granted clearance is automatically revoked.
               </li>
               <li>
-                <strong>Strict Missing Data Policy:</strong> Missing temperature measurements are NEVER counted as fever-free days. If a daily check is missed, the consecutive fever-free streak is interrupted.
+                <strong>Stage 3 (Administrative Discharge &amp; Bed Release):</strong> Administrators verify administrative readiness and execute final discharge, which releases the bed into available inventory immediately.
               </li>
               <li>
-                <strong>Streak Reset on Fever:</strong> Any recorded measurement &ge; {feverThreshold.toFixed(1)}°C immediately resets the fever-free counter to zero.
+                <strong>Configurable Fever Threshold ({feverThreshold.toFixed(1)}°C):</strong> 38.0°C is an adjustable prototype assumption, not a static clinical absolute.
               </li>
               <li>
-                <strong>No Automated Clinical Decision-Making:</strong> The system identifies eligibility criteria, but NEVER automatically diagnoses, prescribes treatment, or discharges patients without explicit authorized human clinical confirmation.
+                <strong>No Automated Discharge:</strong> The system gates eligibility but never discharges patients without explicit human clinician and administrative sign-offs.
               </li>
             </ul>
           </div>
@@ -107,7 +107,7 @@ export const AboutModal: React.FC = () => {
           <div>
             <h4 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-blue-600" />
-              4. Role-Based Access Control (RBAC)
+              4. Role-Based Access Control (RBAC) &amp; Security Disclaimer
             </h4>
             <ul className="space-y-1.5 pl-4 list-disc text-slate-600">
               <li>
@@ -118,6 +118,30 @@ export const AboutModal: React.FC = () => {
               </li>
               <li>
                 <strong>Administrator:</strong> Patient admissions &amp; bed assignment, occupancy governance, formal discharge authorization, final clinical outcome records (recovery/death).
+              </li>
+              <li>
+                <strong>Important Limitation:</strong> Frontend validation and the simulated role switcher enforce business rules for assessment evaluation, but do NOT provide production-grade authentication or server-side authorization. JSON Server does not enforce database constraints.
+              </li>
+            </ul>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
+              <Layers className="w-4 h-4 text-blue-600" />
+              5. JSON Server REST Backend &amp; Vercel Deployment
+            </h4>
+            <ul className="space-y-1.5 pl-4 list-disc text-slate-600">
+              <li>
+                <strong>REST Endpoints:</strong> Connected to lightweight JSON Server on port 3001 serving collections: <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/patients</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/temperatureReadings</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/consultations</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/discharges</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/outcomes</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/activityLogs</code>, and <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">/facilityConfig</code>.
+              </li>
+              <li>
+                <strong>Local Development:</strong> Run <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">npm run dev:all</code> to launch both the Vite frontend and JSON Server concurrently.
+              </li>
+              <li>
+                <strong>Vercel Deployment:</strong> The frontend is fully compatible with Vercel SPA deployment. To connect a deployed frontend to an API backend, host JSON Server on a persistent cloud service (e.g., Render, Railway, Fly.io) and configure the <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">VITE_API_URL</code> environment variable in your Vercel project settings.
+              </li>
+              <li>
+                <strong>Resilient Fallback:</strong> If <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[11px]">VITE_API_URL</code> is unconfigured or the server is offline, CareTrack operates seamlessly on local browser storage fallback, displaying a clear connection indicator in the navigation bar.
               </li>
             </ul>
           </div>

@@ -216,6 +216,14 @@ export const INITIAL_PATIENTS: Patient[] = [
         recommendDischargeReview: true,
       },
     ],
+    doctorClearance: {
+      isCleared: true,
+      clearedDate: '2026-10-23',
+      clearedTime: '09:40',
+      doctorName: 'Dr. Marcus Vance',
+      doctorId: 'USR-D-401',
+      clinicalJustification: 'Completed 4 fever-free days, asymptomatic, PCR negative.',
+    },
   },
 
   // 3. Elena Santos: Pending temperature check today, Pending doctor visit today

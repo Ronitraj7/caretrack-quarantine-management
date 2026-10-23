@@ -109,12 +109,12 @@ export const AssessmentGuideModal: React.FC = () => {
     },
     {
       num: 6,
-      title: 'Identify discharge eligibility after 3 fever-free days',
+      title: 'Verify Stage 1 Clinical Eligibility (3 Fever-Free Days)',
       role: 'doctor' as const,
       tab: 'discharge' as const,
       icon: CheckCircle,
-      description: 'Inspect Arthur Pendelton (PT-1001) or Zoe Tanaka (PT-1002) in Discharge Management. Notice the exact 3 qualifying afebrile dates shown, and verify missing days reset the streak.',
-      actionText: 'View Discharge Eligibility',
+      description: 'Open Discharge Management to inspect Arthur Pendelton (PT-1001). The system proves 3 consecutive calendar days with valid afebrile readings, displays the exact qualifying dates, and confirms streaks reset on fever or missing days.',
+      actionText: 'View Clinical Eligibility',
       handler: () => {
         setActiveRole('doctor');
         setActiveTab('discharge');
@@ -123,29 +123,29 @@ export const AssessmentGuideModal: React.FC = () => {
     },
     {
       num: 7,
-      title: 'Record discharge as authorized user',
-      role: 'admin' as const,
+      title: 'Grant Attending Doctor Medical Clearance (Stage 2)',
+      role: 'doctor' as const,
       tab: 'discharge' as const,
-      icon: LogOut,
-      description: 'As Administrator (or Doctor), click "Authorize & Complete Discharge" for eligible patient Arthur Pendelton. Notice that nurses are prevented from discharging.',
-      actionText: 'Open Discharge Screen',
+      icon: Stethoscope,
+      description: 'As Doctor, sign Attending Physician Medical Clearance for Arthur Pendelton. Notice that Nurses and Administrators cannot issue medical clearance, preserving clinical gatekeeping.',
+      actionText: 'Grant Doctor Clearance',
       handler: () => {
-        setActiveRole('admin');
+        setActiveRole('doctor');
         setActiveTab('discharge');
         setAssessmentGuideOpen(false);
       },
     },
     {
       num: 8,
-      title: 'Verify bed becomes available',
+      title: 'Authorize Admin Discharge & Release Bed (Stage 3)',
       role: 'admin' as const,
-      tab: 'patients' as const,
-      icon: BedDouble,
-      description: 'Check the bed occupancy count in the sidebar and the Patients list. The discharged patient\'s bed (Bed #1) is immediately released and ready for reassignment.',
-      actionText: 'Verify Beds in Patient List',
+      tab: 'discharge' as const,
+      icon: LogOut,
+      description: 'Switch to Administrator role and execute the final administrative discharge for Zoe Tanaka (PT-1002) or Arthur Pendelton. The occupied bed is released immediately. Nurses and Doctors are restricted from this step.',
+      actionText: 'Complete Admin Discharge',
       handler: () => {
         setActiveRole('admin');
-        setActiveTab('patients');
+        setActiveTab('discharge');
         setAssessmentGuideOpen(false);
       },
     },

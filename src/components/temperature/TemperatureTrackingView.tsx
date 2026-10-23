@@ -39,6 +39,7 @@ export const TemperatureTrackingView: React.FC = () => {
   const [notes, setNotes] = useState<string>('');
   const [customTime, setCustomTime] = useState<string>('08:00');
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   const activePatients = useMemo(
     () => patients.filter((p) => p.status === 'active'),
@@ -92,9 +93,9 @@ export const TemperatureTrackingView: React.FC = () => {
     setActiveRecordingPatientId(patientId);
   };
 
-  const handleSaveTemperature = (e: React.FormEvent) => {
+  const handleSaveTemperature = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeRecordingPatientId) return;
+    if (!activeRecordingPatientId || isSubmitting) return;
 
     // Validate first
     const val = validateTemperatureInput(tempValue);
@@ -103,11 +104,20 @@ export const TemperatureTrackingView: React.FC = () => {
       return;
     }
 
-    const res = recordTemperature(activeRecordingPatientId, tempValue, notes, customTime);
-    if (res.success) {
-      setActiveRecordingPatientId(null);
-    } else {
-      setValidationError(res.message);
+    setIsSubmitting(true);
+    setValidationError(null);
+
+    try {
+      const res = await recordTemperature(activeRecordingPatientId, tempValue, notes, customTime);
+      if (res.success) {
+        setActiveRecordingPatientId(null);
+      } else {
+        setValidationError(res.message);
+      }
+    } catch (err: unknown) {
+      setValidationError(err instanceof Error ? err.message : 'An error occurred saving temperature.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -474,9 +484,10 @@ export const TemperatureTrackingView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold rounded-lg shadow-xs flex items-center gap-2"
                 >
-                  Save Measurement
+                  {isSubmitting ? 'Saving to API...' : 'Save Measurement'}
                 </button>
               </div>
             </form>

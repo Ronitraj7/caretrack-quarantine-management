@@ -1,15 +1,19 @@
 /**
  * CareTrack - Facility State Context
- * Handles local persistence, role permissions, daily workflows, and audit logging.
+ * Connects to JSON Server REST API backend with resilient local fallback for offline/preview mode.
+ * Centralized service integration, validation, and role permissions.
  */
 
-import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode, useCallback } from 'react';
 import {
   Patient,
   UserRole,
   UserProfile,
   ActiveTab,
   FacilityMetrics,
+  ActivityLog,
+  DischargeEvent,
+  OutcomeEvent,
 } from '../types';
 import {
   INITIAL_PATIENTS,
@@ -18,14 +22,11 @@ import {
 } from '../data/seedData';
 import {
   calculateFacilityMetrics,
-  isBedOccupied,
-  getWardForBed,
-  validateTemperatureInput,
-  MAX_FACILITY_CAPACITY,
   DEFAULT_FEVER_THRESHOLD,
-  isDailyTemperatureComplete,
-  getLatestTemperature,
+  evaluateDischargeEligibility,
 } from '../utils/calculations';
+import { FacilityService } from '../services/facilityService';
+import { API_BASE_URL } from '../services/apiClient';
 
 interface PatientFilter {
   searchQuery?: string;
@@ -36,6 +37,8 @@ interface PatientFilter {
   eligibleDischarge?: boolean;
   feverToday?: boolean;
 }
+
+export type ApiConnectionStatus = 'connected' | 'offline_fallback' | 'checking';
 
 interface FacilityContextType {
   // State
@@ -52,6 +55,16 @@ interface FacilityContextType {
   aboutModalOpen: boolean;
   notification: { type: 'success' | 'error' | 'info'; message: string } | null;
 
+  // JSON Server REST API backend state
+  apiStatus: ApiConnectionStatus;
+  apiEndpoint: string;
+  apiMessage: string;
+  isLoading: boolean;
+  isSyncing: boolean;
+  activityLogs: ActivityLog[];
+  discharges: DischargeEvent[];
+  outcomes: OutcomeEvent[];
+
   // State Setters
   setActiveRole: (role: UserRole) => void;
   setFacilityDate: (date: string) => void;
@@ -62,8 +75,9 @@ interface FacilityContextType {
   setAssessmentGuideOpen: (open: boolean) => void;
   setAboutModalOpen: (open: boolean) => void;
   clearNotification: () => void;
+  reconnectApi: () => Promise<void>;
 
-  // Actions
+  // Actions (Asynchronous service operations)
   addPatient: (data: {
     id: string;
     name: string;
@@ -72,14 +86,14 @@ interface FacilityContextType {
     bedNumber: number;
     admissionDate: string;
     admissionTime: string;
-  }) => { success: boolean; message: string };
+  }) => Promise<{ success: boolean; message: string }>;
 
   recordTemperature: (
     patientId: string,
     celsiusStr: string | number,
     notes?: string,
     customTime?: string
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
 
   recordDoctorVisit: (
     patientId: string,
@@ -89,23 +103,35 @@ interface FacilityContextType {
       respiratoryStatus: 'normal' | 'mild_distress' | 'moderate_distress' | 'severe';
       recommendDischargeReview: boolean;
     }
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
+
+  grantDoctorClearance: (
+    patientId: string,
+    clinicalJustification: string
+  ) => Promise<{ success: boolean; message: string }>;
+
+  revokeDoctorClearance: (
+    patientId: string,
+    reason: string
+  ) => Promise<{ success: boolean; message: string }>;
 
   recordDischarge: (
     patientId: string,
     notes?: string
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
 
   recordFinalOutcome: (
     patientId: string,
     outcome: 'recovered' | 'deceased',
     notes?: string
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
 
-  resetDemoData: () => void;
+  resetDemoData: () => Promise<void>;
 
   // Helpers
-  checkPermission: (action: 'add_patient' | 'record_temp' | 'doctor_visit' | 'discharge' | 'record_outcome') => {
+  checkPermission: (
+    action: 'add_patient' | 'record_temp' | 'doctor_visit' | 'grant_clearance' | 'discharge' | 'record_outcome'
+  ) => {
     allowed: boolean;
     reason?: string;
   };
@@ -119,7 +145,7 @@ const STORAGE_KEY_THRESHOLD = 'caretrack_threshold_v1';
 const FacilityContext = createContext<FacilityContextType | undefined>(undefined);
 
 export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Load persisted patients or seed data
+  // Local fallback storage initialization
   const [patients, setPatients] = useState<Patient[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_PATIENTS);
@@ -132,7 +158,6 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
     return INITIAL_PATIENTS;
   });
 
-  // Active role
   const [activeRole, setActiveRoleState] = useState<UserRole>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_ROLE);
@@ -140,10 +165,9 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
         return stored as UserRole;
       }
     } catch {}
-    return 'admin'; // Start with Administrator so reviewer sees broad controls
+    return 'admin';
   });
 
-  // Facility Date
   const [facilityDate, setFacilityDateState] = useState<string>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_DATE);
@@ -152,7 +176,6 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
     return DEFAULT_FACILITY_DATE;
   });
 
-  // Fever Threshold
   const [feverThreshold, setFeverThresholdState] = useState<number>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_THRESHOLD);
@@ -171,7 +194,27 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
   const [aboutModalOpen, setAboutModalOpen] = useState<boolean>(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
-  // Sync to LocalStorage
+  // API Backend connection state
+  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>('checking');
+  const [apiMessage, setApiMessage] = useState<string>('Testing connection to JSON Server REST backend...');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [discharges, setDischarges] = useState<DischargeEvent[]>([]);
+  const [outcomes, setOutcomes] = useState<OutcomeEvent[]>([]);
+
+  const currentUser = MOCK_USERS[activeRole] || MOCK_USERS.admin;
+
+  const showNotification = useCallback((type: 'success' | 'error' | 'info', message: string) => {
+    setNotification({ type, message });
+    setTimeout(() => {
+      setNotification((curr) => (curr?.message === message ? null : curr));
+    }, 4500);
+  }, []);
+
+  const clearNotification = useCallback(() => setNotification(null), []);
+
+  // Save to LocalStorage as safe offline backup
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_PATIENTS, JSON.stringify(patients));
@@ -201,70 +244,123 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
     } catch {}
   };
 
-  const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
-    setNotification({ type, message });
-    setTimeout(() => {
-      setNotification((curr) => (curr?.message === message ? null : curr));
-    }, 4500);
+  // Re-fetch and synchronize with JSON Server
+  const loadDataFromApi = useCallback(async (isInitial = false) => {
+    if (isInitial) setIsLoading(true);
+    else setIsSyncing(true);
+
+    try {
+      const health = await FacilityService.checkBackendHealth();
+      if (health.online) {
+        const [remotePatients, remoteLogs, remoteDischarges, remoteOutcomes, remoteConfig] = await Promise.all([
+          FacilityService.loadPatients(),
+          FacilityService.loadActivityLogs(),
+          FacilityService.loadDischarges(),
+          FacilityService.loadOutcomes(),
+          FacilityService.loadFacilityConfig(),
+        ]);
+
+        if (remotePatients && remotePatients.length > 0) {
+          setPatients(remotePatients);
+        }
+        if (remoteLogs) setActivityLogs(remoteLogs);
+        if (remoteDischarges) setDischarges(remoteDischarges);
+        if (remoteOutcomes) setOutcomes(remoteOutcomes);
+        if (remoteConfig?.feverThreshold) setFeverThresholdState(remoteConfig.feverThreshold);
+
+        setApiStatus('connected');
+        setApiMessage(`Active connection: JSON Server at ${API_BASE_URL}`);
+      } else {
+        setApiStatus('offline_fallback');
+        setApiMessage(`JSON Server offline at ${API_BASE_URL}. Operating in browser local demo fallback mode.`);
+      }
+    } catch {
+      setApiStatus('offline_fallback');
+      setApiMessage(`JSON Server offline at ${API_BASE_URL}. Operating in browser local demo fallback mode.`);
+    } finally {
+      setIsLoading(false);
+      setIsSyncing(false);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    loadDataFromApi(true);
+  }, [loadDataFromApi]);
+
+  const reconnectApi = async () => {
+    showNotification('info', `Checking JSON Server connection at ${API_BASE_URL}...`);
+    await loadDataFromApi(false);
   };
-
-  const clearNotification = () => setNotification(null);
-
-  const currentUser = MOCK_USERS[activeRole] || MOCK_USERS.admin;
 
   // Role permissions checker
-  const checkPermission = (action: 'add_patient' | 'record_temp' | 'doctor_visit' | 'discharge' | 'record_outcome'): {
-    allowed: boolean;
-    reason?: string;
-  } => {
-    switch (action) {
-      case 'add_patient':
-        if (activeRole !== 'admin') {
-          return {
-            allowed: false,
-            reason: 'Patient admission and bed assignment requires Administrator role.',
-          };
-        }
-        return { allowed: true };
+  const checkPermission = useCallback(
+    (action: 'add_patient' | 'record_temp' | 'doctor_visit' | 'grant_clearance' | 'discharge' | 'record_outcome'): {
+      allowed: boolean;
+      reason?: string;
+    } => {
+      switch (action) {
+        case 'add_patient':
+          if (activeRole !== 'admin') {
+            return {
+              allowed: false,
+              reason: 'Patient admission and bed assignment requires Administrator role. Switch to Administrator to admit patients.',
+            };
+          }
+          return { allowed: true };
 
-      case 'record_temp':
-        // Nurses are primary, but Doctors and Admins can also record in clinical workflows
-        return { allowed: true };
+        case 'record_temp':
+          return { allowed: true };
 
-      case 'doctor_visit':
-        if (activeRole !== 'doctor') {
-          return {
-            allowed: false,
-            reason: 'Clinical consultations and treatment updates require Doctor role.',
-          };
-        }
-        return { allowed: true };
+        case 'doctor_visit':
+          if (activeRole !== 'doctor') {
+            return {
+              allowed: false,
+              reason: 'Conducting consultations and treatment plans requires Doctor role. Switch to Doctor to record consultations.',
+            };
+          }
+          return { allowed: true };
 
-      case 'discharge':
-        if (activeRole === 'nurse') {
-          return {
-            allowed: false,
-            reason: 'Nurses cannot authorize patient discharges. Requires Administrator or Doctor authorization.',
-          };
-        }
-        return { allowed: true };
+        case 'grant_clearance':
+          if (activeRole !== 'doctor') {
+            return {
+              allowed: false,
+              reason: 'Issuing medical clearance requires Doctor role. Switch to Doctor to evaluate and grant clinical clearance.',
+            };
+          }
+          return { allowed: true };
 
-      case 'record_outcome':
-        if (activeRole === 'nurse') {
-          return {
-            allowed: false,
-            reason: 'Recording final clinical outcomes (recovery/death) requires Administrator or Doctor role.',
-          };
-        }
-        return { allowed: true };
+        case 'discharge':
+          if (activeRole !== 'admin') {
+            return {
+              allowed: false,
+              reason: 'Authorizing final discharge and bed release requires Administrator role. Switch to Administrator to complete discharges.',
+            };
+          }
+          return { allowed: true };
 
-      default:
-        return { allowed: true };
-    }
-  };
+        case 'record_outcome':
+          if (activeRole !== 'admin') {
+            return {
+              allowed: false,
+              reason: 'Certifying final epidemiological patient outcomes requires Administrator role. Switch to Administrator to record outcomes.',
+            };
+          }
+          return { allowed: true };
 
-  // Add Patient
-  const addPatient = (data: {
+        default:
+          return { allowed: true };
+      }
+    },
+    [activeRole]
+  );
+
+  // -------------------------------------------------------------
+  // Action Handlers
+  // -------------------------------------------------------------
+
+  // 1. Add Patient
+  const addPatient = async (data: {
     id: string;
     name: string;
     age: number;
@@ -272,152 +368,83 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
     bedNumber: number;
     admissionDate: string;
     admissionTime: string;
-  }): { success: boolean; message: string } => {
-    // 1. Role verification
-    const perm = checkPermission('add_patient');
-    if (!perm.allowed) {
-      showNotification('error', perm.reason || 'Permission denied.');
-      return { success: false, message: perm.reason || 'Permission denied.' };
-    }
+  }): Promise<{ success: boolean; message: string }> => {
+    setIsSyncing(true);
 
-    // 2. Capacity Check (Max 74)
-    const activeCount = patients.filter((p) => p.status === 'active').length;
-    if (activeCount >= MAX_FACILITY_CAPACITY) {
-      const msg = `Admission rejected: Facility at maximum capacity (${MAX_FACILITY_CAPACITY}/${MAX_FACILITY_CAPACITY} beds occupied).`;
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    // 3. ID Validation
-    const cleanId = data.id.trim().toUpperCase();
-    if (!cleanId) {
-      const msg = 'Patient ID is required.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-    if (patients.some((p) => p.id.toUpperCase() === cleanId)) {
-      const msg = `Duplicate Patient ID: Patient with ID "${cleanId}" already exists in the system.`;
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    // 4. Bed Validation
-    if (data.bedNumber < 1 || data.bedNumber > MAX_FACILITY_CAPACITY) {
-      const msg = `Invalid bed number: Bed must be between 1 and ${MAX_FACILITY_CAPACITY}.`;
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    // 5. Duplicate Active Bed Check
-    if (isBedOccupied(data.bedNumber, patients)) {
-      const occupyingPatient = patients.find(
-        (p) => p.status === 'active' && p.bedNumber === data.bedNumber
-      );
-      const msg = `Bed Collision: Bed #${data.bedNumber} is already occupied by ${occupyingPatient?.name} (${occupyingPatient?.id}).`;
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    // 6. Name validation
-    if (!data.name.trim()) {
-      const msg = 'Patient name is required.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    const newPatient: Patient = {
-      id: cleanId,
-      name: data.name.trim(),
-      age: Number(data.age) || 0,
-      gender: data.gender,
-      admissionDate: data.admissionDate || facilityDate,
-      admissionTime: data.admissionTime || '09:00',
-      bedNumber: data.bedNumber,
-      ward: getWardForBed(data.bedNumber),
-      status: 'active',
-      finalOutcome: 'active',
-      temperatureHistory: [],
-      doctorVisits: [],
-    };
-
-    setPatients((prev) => [newPatient, ...prev]);
-    const successMsg = `Patient ${newPatient.name} (${newPatient.id}) admitted to Bed #${newPatient.bedNumber} (${newPatient.ward}).`;
-    showNotification('success', successMsg);
-    return { success: true, message: successMsg };
-  };
-
-  // Record Temperature
-  const recordTemperature = (
-    patientId: string,
-    celsiusInput: string | number,
-    notes?: string,
-    customTime?: string
-  ): { success: boolean; message: string } => {
-    // 1. Validate measurement
-    const validation = validateTemperatureInput(celsiusInput);
-    if (!validation.isValid || validation.numValue === null) {
-      const msg = validation.errorMessage || 'Invalid temperature value.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    const tempCelsius = validation.numValue;
-    const isFever = tempCelsius >= feverThreshold;
-
-    const patient = patients.find((p) => p.id === patientId);
-    if (!patient) {
-      const msg = 'Patient not found.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    if (patient.status !== 'active') {
-      const msg = 'Cannot record temperature for a discharged patient.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    // Check if repeat measurement today
-    const alreadyHadReadingToday = isDailyTemperatureComplete(patient, facilityDate);
-    const now = new Date();
-    const currentTimeStr =
-      customTime ||
-      `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-    const newReading = {
-      id: `TR-${patient.id}-${Date.now()}`,
-      patientId: patient.id,
-      date: facilityDate,
-      time: currentTimeStr,
-      timestamp: Date.now(),
-      celsius: tempCelsius,
-      isFever,
-      recordedBy: currentUser.name,
-      recordedByRole: currentUser.role,
-      notes: notes?.trim() || undefined,
-      isRepeatMeasurement: alreadyHadReadingToday,
-    };
-
-    setPatients((prev) =>
-      prev.map((p) => {
-        if (p.id !== patientId) return p;
-        return {
-          ...p,
-          // Append reading to history without overwriting previous readings!
-          temperatureHistory: [...p.temperatureHistory, newReading],
-        };
-      })
+    const res = await FacilityService.admitPatient(
+      {
+        ...data,
+        ward: data.bedNumber <= 25 ? 'Ward A' : data.bedNumber <= 50 ? 'Ward B' : 'Ward C',
+      },
+      patients,
+      currentUser
     );
 
-    const feverLabel = isFever ? ' (FEVER DETECTED)' : ' (Afebrile)';
-    const repeatLabel = alreadyHadReadingToday ? ' [Repeat measurement preserved]' : '';
-    const successMsg = `Recorded ${tempCelsius.toFixed(1)}°C${feverLabel} for ${patient.name} by ${currentUser.name}.${repeatLabel}`;
-    showNotification('success', successMsg);
-    return { success: true, message: successMsg };
+    setIsSyncing(false);
+
+    if (res.success && res.data) {
+      setPatients((prev) => [res.data as Patient, ...prev]);
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
   };
 
-  // Record Doctor Visit
-  const recordDoctorVisit = (
+  // 2. Record Temperature
+  const recordTemperature = async (
+    patientId: string,
+    celsiusStr: string | number,
+    notes?: string,
+    customTime?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      const msg = 'Patient record not found.';
+      showNotification('error', msg);
+      return { success: false, message: msg };
+    }
+
+    const isRepeat = patient.temperatureHistory.some((t) => t.date === facilityDate);
+    setIsSyncing(true);
+
+    const res = await FacilityService.recordTemperature(
+      patientId,
+      celsiusStr,
+      notes || '',
+      isRepeat,
+      patient,
+      facilityDate,
+      feverThreshold,
+      currentUser
+    );
+
+    setIsSyncing(false);
+
+    if (res.success && res.data) {
+      const newReading = res.data;
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          const isFever = newReading.isFever;
+          return {
+            ...p,
+            temperatureHistory: [...p.temperatureHistory, newReading],
+            doctorClearance: isFever && p.doctorClearance?.isCleared ? undefined : p.doctorClearance,
+          };
+        })
+      );
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
+  };
+
+  // 3. Record Doctor Visit
+  const recordDoctorVisit = async (
     patientId: string,
     data: {
       clinicalNotes: string;
@@ -425,223 +452,299 @@ export const FacilityProvider: React.FC<{ children: ReactNode }> = ({ children }
       respiratoryStatus: 'normal' | 'mild_distress' | 'moderate_distress' | 'severe';
       recommendDischargeReview: boolean;
     }
-  ): { success: boolean; message: string } => {
-    const perm = checkPermission('doctor_visit');
-    if (!perm.allowed) {
-      showNotification('error', perm.reason || 'Permission denied.');
-      return { success: false, message: perm.reason || 'Permission denied.' };
-    }
-
+  ): Promise<{ success: boolean; message: string }> => {
     const patient = patients.find((p) => p.id === patientId);
     if (!patient) {
-      const msg = 'Patient not found.';
+      const msg = 'Patient record not found.';
       showNotification('error', msg);
       return { success: false, message: msg };
     }
 
-    if (patient.status !== 'active') {
-      const msg = 'Cannot record consultation for a discharged patient.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
+    setIsSyncing(true);
 
-    // Check accidental duplicate consultation today
-    const existingVisitToday = patient.doctorVisits.find((v) => v.date === facilityDate);
-    if (existingVisitToday) {
-      const msg = `Accidental duplicate prevented: Consultation for ${patient.name} was already recorded today at ${existingVisitToday.time} by ${existingVisitToday.doctorName}.`;
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
-
-    const latestTempToday = getLatestTemperature(patient, facilityDate);
-    const temperatureWasPending = !latestTempToday;
-
-    const now = new Date();
-    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-    const newVisit = {
-      id: `DV-${patient.id}-${Date.now()}`,
-      patientId: patient.id,
-      date: facilityDate,
-      time: timeStr,
-      timestamp: Date.now(),
-      doctorName: currentUser.name,
-      doctorId: currentUser.id,
-      clinicalNotes: data.clinicalNotes.trim(),
-      treatmentUpdates: data.treatmentUpdates.trim(),
-      respiratoryStatus: data.respiratoryStatus,
-      temperatureAtConsultation: latestTempToday ? latestTempToday.celsius : undefined,
-      temperatureWasPending,
-      recommendDischargeReview: data.recommendDischargeReview,
-    };
-
-    setPatients((prev) =>
-      prev.map((p) => {
-        if (p.id !== patientId) return p;
-        return {
-          ...p,
-          doctorVisits: [...p.doctorVisits, newVisit],
-        };
-      })
+    const res = await FacilityService.recordDoctorVisit(
+      patientId,
+      data,
+      patient,
+      facilityDate,
+      currentUser
     );
 
-    const warnPending = temperatureWasPending ? ' [Warning: Temp check was pending at time of consult]' : '';
-    const successMsg = `Doctor consultation completed for ${patient.name} by ${currentUser.name}.${warnPending}`;
-    showNotification('success', successMsg);
-    return { success: true, message: successMsg };
+    setIsSyncing(false);
+
+    if (res.success && res.data) {
+      const newVisit = res.data;
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          return {
+            ...p,
+            doctorVisits: [...p.doctorVisits, newVisit],
+          };
+        })
+      );
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
   };
 
-  // Record Discharge
-  const recordDischarge = (
+  // 4. Grant Doctor Clearance (Stage 2)
+  const grantDoctorClearance = async (
+    patientId: string,
+    clinicalJustification: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      const msg = 'Patient record not found.';
+      showNotification('error', msg);
+      return { success: false, message: msg };
+    }
+
+    setIsSyncing(true);
+
+    const res = await FacilityService.grantDoctorClearance(
+      patientId,
+      clinicalJustification,
+      patient,
+      facilityDate,
+      feverThreshold,
+      currentUser
+    );
+
+    setIsSyncing(false);
+
+    if (res.success) {
+      const now = new Date();
+      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          return {
+            ...p,
+            doctorClearance: {
+              isCleared: true,
+              clearedDate: facilityDate,
+              clearedTime: timeStr,
+              doctorName: currentUser.name,
+              doctorId: currentUser.id,
+              clinicalJustification: clinicalJustification.trim(),
+            },
+          };
+        })
+      );
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
+  };
+
+  // 5. Revoke Doctor Clearance
+  const revokeDoctorClearance = async (
+    patientId: string,
+    reason: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      const msg = 'Patient record not found.';
+      showNotification('error', msg);
+      return { success: false, message: msg };
+    }
+
+    setIsSyncing(true);
+    const res = await FacilityService.revokeDoctorClearance(
+      patientId,
+      reason,
+      patient,
+      facilityDate,
+      currentUser
+    );
+    setIsSyncing(false);
+
+    if (res.success) {
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          return {
+            ...p,
+            doctorClearance: undefined,
+          };
+        })
+      );
+      showNotification('info', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
+  };
+
+  // 6. Record Administrative Discharge (Stage 3)
+  const recordDischarge = async (
     patientId: string,
     notes?: string
-  ): { success: boolean; message: string } => {
-    const perm = checkPermission('discharge');
-    if (!perm.allowed) {
-      showNotification('error', perm.reason || 'Permission denied.');
-      return { success: false, message: perm.reason || 'Permission denied.' };
-    }
-
+  ): Promise<{ success: boolean; message: string }> => {
     const patient = patients.find((p) => p.id === patientId);
     if (!patient) {
-      const msg = 'Patient not found.';
+      const msg = 'Patient record not found.';
       showNotification('error', msg);
       return { success: false, message: msg };
     }
 
-    if (patient.status === 'discharged') {
-      const msg = 'Patient is already discharged. Completed discharges cannot be modified.';
-      showNotification('error', msg);
-      return { success: false, message: msg };
-    }
+    setIsSyncing(true);
 
-    const freedBedNumber = patient.bedNumber;
-
-    setPatients((prev) =>
-      prev.map((p) => {
-        if (p.id !== patientId) return p;
-        return {
-          ...p,
-          status: 'discharged',
-          dischargeDate: facilityDate,
-          dischargeAuthorizedBy: `${currentUser.name} (${currentUser.title})`,
-          // Default final outcome on discharge is 'recovered' if not already set,
-          // but administrator can also specify or update
-          finalOutcome: p.finalOutcome === 'active' ? 'recovered' : p.finalOutcome,
-          outcomeDate: facilityDate,
-          outcomeRecordedBy: `${currentUser.name} (${currentUser.title})`,
-          outcomeNotes: notes?.trim() || 'Discharged from facility after meeting clearance criteria.',
-        };
-      })
+    const res = await FacilityService.completeAdminDischarge(
+      patientId,
+      notes || '',
+      patient,
+      facilityDate,
+      feverThreshold,
+      currentUser
     );
 
-    const successMsg = `Patient ${patient.name} (${patient.id}) successfully discharged! Bed #${freedBedNumber} is now free and available.`;
-    showNotification('success', successMsg);
-    return { success: true, message: successMsg };
+    setIsSyncing(false);
+
+    if (res.success) {
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          return {
+            ...p,
+            status: 'discharged',
+            dischargeDate: facilityDate,
+            dischargeAuthorizedBy: `${currentUser.name} (${currentUser.title})`,
+          };
+        })
+      );
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
   };
 
-  // Record Final Outcome
-  const recordFinalOutcome = (
+  // 7. Record Final Clinical Outcome
+  const recordFinalOutcome = async (
     patientId: string,
     outcome: 'recovered' | 'deceased',
     notes?: string
-  ): { success: boolean; message: string } => {
-    const perm = checkPermission('record_outcome');
-    if (!perm.allowed) {
-      showNotification('error', perm.reason || 'Permission denied.');
-      return { success: false, message: perm.reason || 'Permission denied.' };
-    }
-
+  ): Promise<{ success: boolean; message: string }> => {
     const patient = patients.find((p) => p.id === patientId);
     if (!patient) {
-      const msg = 'Patient not found.';
+      const msg = 'Patient record not found.';
       showNotification('error', msg);
       return { success: false, message: msg };
     }
 
-    setPatients((prev) =>
-      prev.map((p) => {
-        if (p.id !== patientId) return p;
-        return {
-          ...p,
-          finalOutcome: outcome,
-          outcomeDate: facilityDate,
-          outcomeRecordedBy: `${currentUser.name} (${currentUser.title})`,
-          outcomeNotes: notes?.trim() || undefined,
-          // If deceased while active, also release bed and discharge
-          ...(outcome === 'deceased' && p.status === 'active'
-            ? {
-                status: 'discharged' as const,
-                dischargeDate: facilityDate,
-                dischargeAuthorizedBy: `${currentUser.name} (Clinical Decease Record)`,
-              }
-            : {}),
-        };
-      })
+    setIsSyncing(true);
+
+    const res = await FacilityService.recordFinalOutcome(
+      patientId,
+      outcome,
+      notes || '',
+      patient,
+      facilityDate,
+      currentUser
     );
 
-    const outcomeText = outcome === 'recovered' ? 'Recovered' : 'Deceased';
-    const successMsg = `Final outcome for ${patient.name} recorded as "${outcomeText}". Analytics metrics updated immediately.`;
-    showNotification('success', successMsg);
-    return { success: true, message: successMsg };
+    setIsSyncing(false);
+
+    if (res.success) {
+      const newAuditEntry = {
+        outcome,
+        date: facilityDate,
+        recordedBy: `${currentUser.name} (${currentUser.role})`,
+        notes: notes?.trim() || undefined,
+        timestamp: Date.now(),
+      };
+
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== patientId) return p;
+          return {
+            ...p,
+            finalOutcome: outcome,
+            outcomeDate: facilityDate,
+            outcomeRecordedBy: currentUser.name,
+            outcomeNotes: notes?.trim() || undefined,
+            outcomeHistory: [...(p.outcomeHistory || []), newAuditEntry],
+          };
+        })
+      );
+      showNotification('success', res.message);
+      return { success: true, message: res.message };
+    } else {
+      showNotification('error', res.message);
+      return { success: false, message: res.message };
+    }
   };
 
-  // Reset Demo Data
-  const resetDemoData = () => {
+  // 8. Reset to Seed Data
+  const resetDemoData = async () => {
+    localStorage.removeItem(STORAGE_KEY_PATIENTS);
     setPatients(INITIAL_PATIENTS);
     setFacilityDateState(DEFAULT_FACILITY_DATE);
     setFeverThresholdState(DEFAULT_FEVER_THRESHOLD);
-    try {
-      localStorage.setItem(STORAGE_KEY_PATIENTS, JSON.stringify(INITIAL_PATIENTS));
-      localStorage.setItem(STORAGE_KEY_DATE, DEFAULT_FACILITY_DATE);
-      localStorage.setItem(STORAGE_KEY_THRESHOLD, String(DEFAULT_FEVER_THRESHOLD));
-    } catch {}
-    showNotification('info', 'Prototype restored to pristine initial seed state.');
+    showNotification('info', 'Demo patient database reset to initial reference state.');
+    if (apiStatus === 'connected') {
+      await loadDataFromApi(false);
+    }
   };
 
-  // Recalculate metrics immediately when patients, facilityDate, or feverThreshold changes
+  // Dynamic Metrics calculation
   const metrics = useMemo(() => {
     return calculateFacilityMetrics(patients, facilityDate, feverThreshold);
   }, [patients, facilityDate, feverThreshold]);
 
-  return (
-    <FacilityContext.Provider
-      value={{
-        patients,
-        activeRole,
-        currentUser,
-        facilityDate,
-        feverThreshold,
-        activeTab,
-        patientFilter,
-        selectedPatientId,
-        metrics,
-        assessmentGuideOpen,
-        aboutModalOpen,
-        notification,
+  const value = {
+    patients,
+    activeRole,
+    currentUser,
+    facilityDate,
+    feverThreshold,
+    activeTab,
+    patientFilter,
+    selectedPatientId,
+    metrics,
+    assessmentGuideOpen,
+    aboutModalOpen,
+    notification,
+    apiStatus,
+    apiEndpoint: API_BASE_URL,
+    apiMessage,
+    isLoading,
+    isSyncing,
+    activityLogs,
+    discharges,
+    outcomes,
+    setActiveRole,
+    setFacilityDate,
+    setFeverThreshold,
+    setActiveTab,
+    setPatientFilter,
+    setSelectedPatientId,
+    setAssessmentGuideOpen,
+    setAboutModalOpen,
+    clearNotification,
+    reconnectApi,
+    addPatient,
+    recordTemperature,
+    recordDoctorVisit,
+    grantDoctorClearance,
+    revokeDoctorClearance,
+    recordDischarge,
+    recordFinalOutcome,
+    resetDemoData,
+    checkPermission,
+  };
 
-        setActiveRole,
-        setFacilityDate,
-        setFeverThreshold,
-        setActiveTab,
-        setPatientFilter,
-        setSelectedPatientId,
-        setAssessmentGuideOpen,
-        setAboutModalOpen,
-        clearNotification,
-
-        addPatient,
-        recordTemperature,
-        recordDoctorVisit,
-        recordDischarge,
-        recordFinalOutcome,
-        resetDemoData,
-        checkPermission,
-      }}
-    >
-      {children}
-    </FacilityContext.Provider>
-  );
+  return <FacilityContext.Provider value={value}>{children}</FacilityContext.Provider>;
 };
 
 export const useFacility = () => {

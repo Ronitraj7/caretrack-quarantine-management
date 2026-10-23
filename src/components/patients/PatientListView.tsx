@@ -53,6 +53,7 @@ export const PatientListView: React.FC = () => {
   const [newAdmissionDate, setNewAdmissionDate] = useState(facilityDate);
   const [newAdmissionTime, setNewAdmissionTime] = useState('09:30');
   const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Filter values
   const searchQuery = patientFilter.searchQuery || '';
@@ -128,24 +129,33 @@ export const PatientListView: React.FC = () => {
     setShowAddModal(true);
   };
 
-  const handleSaveNewPatient = (e: React.FormEvent) => {
+  const handleSaveNewPatient = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     setFormError(null);
+    setIsSubmitting(true);
 
-    const res = addPatient({
-      id: newId,
-      name: newName,
-      age: Number(newAge) || 0,
-      gender: newGender,
-      bedNumber: Number(newBed),
-      admissionDate: newAdmissionDate,
-      admissionTime: newAdmissionTime,
-    });
+    try {
+      const res = await addPatient({
+        id: newId,
+        name: newName,
+        age: Number(newAge) || 0,
+        gender: newGender,
+        bedNumber: Number(newBed),
+        admissionDate: newAdmissionDate,
+        admissionTime: newAdmissionTime,
+      });
 
-    if (res.success) {
-      setShowAddModal(false);
-    } else {
-      setFormError(res.message);
+      if (res.success) {
+        setShowAddModal(false);
+      } else {
+        setFormError(res.message);
+      }
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'Error admitting patient to API.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -672,9 +682,10 @@ export const PatientListView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold rounded-lg shadow-xs flex items-center gap-2"
                 >
-                  Confirm Admission
+                  {isSubmitting ? 'Admitting...' : 'Confirm Admission'}
                 </button>
               </div>
             </form>

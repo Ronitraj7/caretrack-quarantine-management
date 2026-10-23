@@ -13,6 +13,10 @@ import {
   Stethoscope,
   HeartPulse,
   Award,
+  Server,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -25,6 +29,10 @@ export const Header: React.FC<HeaderProps> = ({ onMobileMenuToggle }) => {
     currentUser,
     facilityDate,
     feverThreshold,
+    apiStatus,
+    apiEndpoint,
+    isSyncing,
+    reconnectApi,
     setActiveRole,
     setFacilityDate,
     setFeverThreshold,
@@ -214,6 +222,54 @@ export const Header: React.FC<HeaderProps> = ({ onMobileMenuToggle }) => {
                 </button>
               </div>
             )}
+          </div>
+
+          {/* JSON Server REST API Connection Badge */}
+          <div className="hidden sm:flex items-center gap-1.5 pl-1">
+            <div
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                apiStatus === 'connected'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : apiStatus === 'checking' || isSyncing
+                  ? 'bg-blue-50 border-blue-200 text-blue-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-800'
+              }`}
+              title={
+                apiStatus === 'connected'
+                  ? `REST API Connected: ${apiEndpoint} (syncing patients, readings, consultations, discharges, outcomes)`
+                  : `Offline Fallback Mode: JSON Server at ${apiEndpoint} not detected. Using browser local storage. Click Retry to test.`
+              }
+            >
+              {isSyncing ? (
+                <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+              ) : apiStatus === 'connected' ? (
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+              ) : (
+                <span className="inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+              )}
+
+              <Server className="w-3.5 h-3.5 text-slate-500" />
+              <span className="hidden lg:inline">
+                {apiStatus === 'connected'
+                  ? 'JSON Server (3001)'
+                  : isSyncing
+                  ? 'Syncing API...'
+                  : 'API Offline (Local)'}
+              </span>
+
+              {apiStatus !== 'connected' && !isSyncing && (
+                <button
+                  onClick={reconnectApi}
+                  className="ml-1 text-[11px] font-semibold underline hover:text-amber-950"
+                  title="Attempt to reconnect to JSON Server"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
